@@ -237,7 +237,7 @@ Así puedes personalizar un componente compartido en una sola app sin tocar la l
 | `app/composables/useApiBase.ts` | Composable compartido (ejemplo). |
 | `app/app.config.ts` | `app.config` compartido; declara `myLayer.name` y su tipo. |
 | `app/app.vue` | Solo lo usa el **playground**. Las apps tienen su propio `app.vue`, que tiene prioridad. |
-| `.playground/` | Mini app Nuxt que hace `extends: ['..']` para probar la layer **sola**, sin las apps. |
+| `.playground/` | Mini app Nuxt que hace `extends: ['..']` para probar la layer **sola**, sin las apps. Detalle en la sección 4.6. |
 | `.playground/app.config.ts` | Muestra cómo una app sobrescribe el `app.config` de la layer. |
 | `tsconfig.json` | `extends: "./.playground/.nuxt/tsconfig.json"`: la layer toma sus tipos del playground. |
 | `.nuxtrc` | `typescript.includeWorkspace = true`: según el esquema de Nuxt, "Include parent workspace in the Nuxt project. Mostly useful for themes and module authors" **[probado: leído del esquema instalado]**. Lo interpreto como que el playground incluye en sus tipos la carpeta padre (la layer); la descripción no da más detalle. |
@@ -258,7 +258,99 @@ Scripts de la layer:
 
 `nuxi` y `nuxt` son **el mismo binario**: el paquete `nuxt` declara ambos nombres apuntando a `bin/nuxt.mjs` **[probado]**. El argumento `.playground` indica la carpeta del proyecto Nuxt sobre el que se trabaja.
 
-### 4.6 Reglas importantes al escribir código en la layer
+### 4.6 La carpeta `.playground/`
+
+#### Qué es
+
+Una layer **no está pensada para ejecutarse sola**: es un trozo de app que otra app extiende. Para poder probarla sin arrancar `web` ni `backoffice`, el template `layer` incluye `.playground/`, una **app Nuxt mínima cuyo único trabajo es extender la layer**:
+
+```ts
+// packages/base-layer/.playground/nuxt.config.ts
+export default defineNuxtConfig({
+  extends: ['..'],            // ← la carpeta padre: la layer
+  modules: ['@nuxt/eslint'],  // genera la config de ESLint que usa la layer
+  eslint: {
+    config: {
+      rootDir: fileURLToPath(new URL('..', import.meta.url)),
+    },
+  },
+})
+```
+
+Es exactamente el mismo mecanismo que usan `web` y `backoffice` (`extends`). La diferencia es que aquí la layer se referencia por **ruta relativa** (`'..'`) en vez de por nombre de paquete.
+
+#### Qué contiene
+
+```
+.playground/
+├── nuxt.config.ts     ← versionado: extends: ['..'] + módulo de ESLint
+├── app.config.ts      ← versionado: sobrescribe myLayer.name para demostrar el override
+├── .nuxt/             ← generado (tipos), ignorado por git
+├── .output/           ← generado si haces build, ignorado por git
+└── node_modules/      ← generado (caché de Nuxt), ignorado por git
+```
+
+Solo hay que versionar `nuxt.config.ts` y `app.config.ts`. El `.gitignore` de la layer ya ignora `.nuxt`, `.output` y `node_modules` en cualquier subcarpeta.
+
+#### Para qué sirve (tres trabajos)
+
+1. **Probar la layer aislada.** `pnpm --filter base-layer dev` levanta el playground. Lo ejecuté y muestra **[probado]**:
+
+   ```
+   App  (componente de la layer: My amazing Nuxt layer (overwritten))
+   ```
+
+   - `App` es el valor **por defecto** de `runtimeConfig.public.appName` en la layer, porque el playground no lo sobrescribe.
+   - `My amazing Nuxt layer (overwritten)` viene de `.playground/app.config.ts`, que sobrescribe el `myLayer.name` de la layer. Es un ejemplo en miniatura de la prioridad de la sección 4.3.
+   - El `app/app.vue` de la layer (que solo renderiza `<AppHeader />`) **solo** se ve aquí. En las apps lo tapa su propio `app.vue`.
+
+2. **Darle tipos a la layer.** El `tsconfig.json` de la layer hace `extends: "./.playground/.nuxt/tsconfig.json"`, y el `postinstall` de la layer ejecuta `nuxt prepare .playground`. Es decir, los tipos con los que el editor revisa el código de la layer **se generan dentro del playground**. El `tsconfig` del playground incluye la carpeta de la layer (`../../app/**/*`) **[probado]**. Por eso, si borras `.playground/.nuxt/`, los archivos de la layer vuelven a marcar `Cannot find name ...` hasta el siguiente `pnpm install`.
+
+3. **Generar la config de ESLint.** El módulo `@nuxt/eslint` del playground genera `.playground/.nuxt/eslint.config.mjs`, y el `eslint.config.js` de la layer lo importa. Con eso funciona `pnpm --filter base-layer lint` **[probado]**.
+
+#### Qué NO es
+
+- **No es parte de las apps.** Ni los tipos ni los componentes de `web` contienen nada de `.playground` **[probado]**. Las apps extienden la layer (`packages/base-layer/nuxt.config.ts`), no el playground.
+- **No se despliega.** El `.output` de las apps no lo incluye.
+- **No es un proyecto del workspace.** No tiene `package.json`; para pnpm es solo una carpeta más dentro de `base-layer`.
+
+#### ⚠️ Choque de puerto con `web`
+
+El script `dev` de la layer (`nuxi dev .playground`) no fija puerto, así que usa el **3000**, el mismo que `web` **[probado]**. No puedes tener `pnpm dev` y el playground corriendo a la vez. Si lo necesitas, cambia el script de la layer, por ejemplo:
+
+```jsonc
+"dev": "nuxi dev .playground --port 3002 --strictPort"
+```
+
+(No lo probé con este proyecto, pero es la misma opción `--port` que usan las apps.)
+
+#### Comandos que actúan sobre el playground
+
+| Comando (desde la raíz) | Script de la layer | Qué hace |
+|---|---|---|
+| `pnpm --filter base-layer dev` | `nuxi dev .playground` | Levanta el playground (puerto 3000) |
+| `pnpm --filter base-layer build` | `nuxt build .playground` | Compila el playground a `.playground/.output/`. Solo sirve para comprobar que la layer compila; **no** es un build que se despliegue. |
+| `pnpm --filter base-layer dev:prepare` | `nuxt prepare .playground` | Regenera los tipos (lo mismo que hace `postinstall`) |
+| `pnpm --filter base-layer lint` | `eslint .` | Lint de la layer con la config generada por el playground |
+
+`pnpm build` desde la raíz **no** compila el playground, porque su filtro es `"./apps/*"`.
+
+#### ¿Por qué empieza con punto?
+
+No encontré documentación que lo explique; parece una convención del template para indicar que es una carpeta auxiliar y no parte del código que se comparte. En la práctica no cambia nada: Nuxt solo escanea las carpetas de la sección 4.1 (`app/`, `server/`, …), y `.playground/` no es una de ellas.
+
+#### ¿Se puede quitar?
+
+Sí, pero no lo recomiendo, porque pierdes los tres trabajos de arriba. Si aun así quieres hacerlo:
+
+1. Borra `.playground/`, `eslint.config.js` y `.nuxtrc`, y quita `@nuxt/eslint` y `eslint` de `devDependencies` (o configura ESLint de otra forma).
+2. Cambia el `postinstall` de la layer a `"nuxt prepare"` (sin `.playground`), para que genere `.nuxt/` en la raíz de la layer.
+3. Cambia el `tsconfig.json` de la layer al mismo formato que usan las apps (con `references` a `./.nuxt/tsconfig.*.json`).
+4. Quita los scripts `dev`, `build`, `generate` y `preview` de la layer.
+
+La primera versión de este ejemplo tenía la layer configurada así, sin playground, y TypeScript no daba errores **[probado en esa versión]**. Lo que no probé es hacer estos pasos sobre la versión actual.
+
+### 4.7 Reglas importantes al escribir código en la layer
 
 1. **Dependencias**: todo lo que la layer *importe* (por ejemplo `zod` o `dayjs`) va en sus `dependencies`. `nuxt` y lo que sea solo para pruebas va en `devDependencies` **[doc]**.
 
@@ -417,6 +509,8 @@ pnpm --filter web preview       # probar el build en local (:4000)
 | `Cannot find name 'defineNuxtConfig'` (o `useRuntimeConfig`, etc.) | Falta `.nuxt/` o el `tsconfig.json` | `pnpm install` y reiniciar el TS Server del editor |
 | `pnpm dev` falla con "port in use" | `--strictPort` y el puerto está ocupado | Cierra el proceso que lo usa o cambia el puerto en el script |
 | La segunda app no arranca con `pnpm dev` | Falta `--parallel` | Debe estar en el script `dev` de la raíz |
+| El playground de la layer y `web` no arrancan a la vez | Ambos usan el puerto 3000 | Dale otro puerto al script `dev` de la layer (sección 4.6) |
+| La layer marca `Cannot find name ...` en el editor | Falta `.playground/.nuxt/` (de ahí salen sus tipos) | `pnpm install` o `pnpm --filter base-layer dev:prepare` |
 | Error al importar un paquete desde la layer | La dependencia no está en `dependencies` de la layer | `pnpm --filter base-layer add <paquete>` |
 | Un import con `~/` desde la layer no encuentra el archivo | `~` apunta a la app, no a la layer | Usa imports relativos o auto-imports |
 | Un componente de la layer no cambia en una app | La app tiene un archivo con el mismo nombre, que tiene prioridad | Revisa `apps/<app>/app/components/` |
